@@ -6,6 +6,8 @@ A small Windows-only desktop widget that shows live usage meters for **Claude** 
 
 For each provider you get plan name (when known), usage bars with percent and reset countdowns, and status when sign-in or fetch fails. Cursor usage (included % and reset time) matches the numbers shown in the Cursor CLI and dashboard **included usage** panel. Data is refreshed on a background thread on a configurable interval (minimum 30 seconds).
 
+Only one copy of the widget runs at a time; launching it again does nothing while it's already running.
+
 ## Build and run
 
 ```powershell
@@ -29,8 +31,9 @@ Location: `%APPDATA%\ai-usage-widget\config.json` (created on first run).
 | `window_x`, `window_y` | Last window position |
 | `always_on_top` | Keep the widget above other windows |
 | `poll_seconds` | Refresh interval (clamped to at least 30) |
-| `layout` | `"vertical"` (default) or `"horizontal"` (compact two-row strip) |
+| `layout` | `"vertical"` (default), `"horizontal"` (two-row strip), or `"rings"` (one row: provider icons + circular meters, no text; hover a ring or icon for details) |
 | `taskbar_mode` | `true` docks the strip over the taskbar (implies horizontal layout and always on top) |
+| `transparent_background` | `true` removes the panel background and border; also in the tray menu |
 
 ### Cursor token (optional)
 
@@ -39,12 +42,14 @@ If Cursor IDE is not signed in on this machine, copy the **`WorkosCursorSessionT
 ## Controls
 
 - **Drag** anywhere on the panel to move the window.
-- **Right-click** the background: Refresh now, Always on top, **Horizontal layout**, **Taskbar mode**, Open config file (Notepad), Quit.
+- Right-click on the widget does nothing; all options are in the **tray icon** menu.
+- **Tray icon**: click the AI Usage icon in the notification area (it may be under the **^** hidden-icons arrow; drag it onto the taskbar to keep it visible) for Refresh now, Always on top, **Layout** (Vertical / Horizontal / Rings), **Taskbar mode**, Transparent background, Open config file (Notepad), and Quit.
+- **⟳** (bottom-right): refresh now. Claude usage is fetched at most once a minute even when clicked repeatedly.
 - Position and always-on-top preference are saved automatically.
 
 ## Taskbar mode
 
-Windows 11 has no supported way to embed apps inside the taskbar (deskbands were removed), so the widget docks a compact horizontal strip on top of the taskbar instead.
+Windows 11 has no supported way to embed apps inside the taskbar (deskbands were removed), so the widget docks a compact strip on top of the taskbar instead. Use `layout` `"horizontal"` or `"rings"` in config (or pick Horizontal or Rings under the tray **Layout** submenu).
 
 - It appears to the left of the tray area.
 - Drag it sideways; it snaps back to the taskbar's vertical centre.

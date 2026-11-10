@@ -16,6 +16,7 @@ use crate::model::{
 };
 
 mod compact;
+mod tray;
 
 struct Shared {
     claude: Option<ProviderSnapshot>,
@@ -24,7 +25,7 @@ struct Shared {
 }
 
 fn is_horizontal(cfg: &Config) -> bool {
-    cfg.taskbar_mode || cfg.layout == Layout::Horizontal
+    cfg.taskbar_mode || cfg.layout != Layout::Vertical
 }
 
 #[cfg(windows)]
@@ -143,6 +144,7 @@ fn primary_screen_size() -> (f32, f32) {
 
 fn spawn_worker(
     shared: Arc<Mutex<Shared>>,
+    cfg: Arc<Mutex<Config>>,
     ctx: egui::Context,
     rx: mpsc::Receiver<()>,
     poll: Duration,
@@ -155,9 +157,12 @@ fn spawn_worker(
                 s.refreshing = true;
             }
 
-            let cfg = config::load();
+            let cfg_disk = config::load();
+            if let Ok(mut c) = cfg.lock() {
+                c.transparent_background = cfg_disk.transparent_background;
+            }
             let claude_snap = claude_poller.poll();
-            let cursor_snap = cursor::fetch(&cfg);
+            let cursor_snap = cursor::fetch(&cfg_disk);
 
             {
                 let mut s = shared.lock().expect("shared lock");
@@ -179,8 +184,9 @@ fn spawn_taskbar_keeper(flag: Arc<AtomicBool>) {
     thread::spawn(move || {
         let mut hwnd: Option<isize> = None;
         let mut hidden = false;
+        let mut owned = false;
         loop {
-            thread::sleep(Duration::from_secs(1));
+            thread::sleep(Duration::from_millis(250));
             if hwnd.is_none() {
                 hwnd = taskbar::find_own_window();
                 if hwnd.is_none() {
@@ -193,7 +199,15 @@ fn spawn_taskbar_keeper(flag: Arc<AtomicBool>) {
                     taskbar::set_visible(h, true);
                     hidden = false;
                 }
+                if owned {
+                    taskbar::set_owned_by_taskbar(h, false);
+                    owned = false;
+                }
                 continue;
+            }
+            if !owned {
+                taskbar::set_owned_by_taskbar(h, true);
+                owned = true;
             }
             if taskbar::fullscreen_app_active() {
                 if !hidden {
@@ -211,44 +225,7 @@ fn spawn_taskbar_keeper(flag: Arc<AtomicBool>) {
     });
 }
 
-/// Initial guess at the popup menu's size (points); corrected after the first frame.
-const MENU_SIZE_ESTIMATE: Vec2 = Vec2::new(170.0, 150.0);
-const MENU_GAP: f32 = 4.0;
-
-/// Right-click menu shown in its own borderless window, used when the main
-/// window is a thin horizontal strip that would clip an inline menu.
-struct PopupMenu {
-    /// Screen x (points) of the right-click.
-    anchor_x: f32,
-    /// Main window's outer rect (points) when the menu was opened.
-    strip: Rect,
-    /// Measured size of the menu window (points).
-    size: Vec2,
-    /// The popup has had keyboard focus at least once; losing it closes the menu.
-    seen_focus: bool,
-}
-
-impl PopupMenu {
-    /// Above the strip when there is room (taskbar at the bottom), else below it;
-    /// clamped horizontally to the screen.
-    fn position(&self) -> egui::Pos2 {
-        let (screen_w, screen_h) = primary_screen_size();
-        let x = (self.anchor_x - 8.0)
-            .min(screen_w - self.size.x - MENU_GAP)
-            .max(MENU_GAP);
-        let above = self.strip.min.y - self.size.y - MENU_GAP;
-        let below = self.strip.max.y + MENU_GAP;
-        let y = if above >= 0.0 || below + self.size.y > screen_h {
-            above.max(0.0)
-        } else {
-            below
-        };
-        egui::pos2(x, y)
-    }
-}
-
 struct WidgetApp {
-    menu: Option<PopupMenu>,
     shared: Arc<Mutex<Shared>>,
     refresh_tx: mpsc::Sender<()>,
     cfg: Arc<Mutex<Config>>,
@@ -256,6 +233,7 @@ struct WidgetApp {
     last_save_at: Option<Instant>,
     quit_pending: bool,
     taskbar_flag: Arc<AtomicBool>,
+    tray: Option<tray::Tray>,
 }
 
 impl WidgetApp {
@@ -272,14 +250,27 @@ impl WidgetApp {
         }));
 
         let (refresh_tx, refresh_rx) = mpsc::channel();
-        spawn_worker(Arc::clone(&shared), cc.egui_ctx.clone(), refresh_rx, poll);
+        spawn_worker(
+            Arc::clone(&shared),
+            Arc::clone(&cfg),
+            cc.egui_ctx.clone(),
+            refresh_rx,
+            poll,
+        );
 
         let taskbar_mode = cfg.lock().expect("cfg lock").taskbar_mode;
         let taskbar_flag = Arc::new(AtomicBool::new(taskbar_mode));
         spawn_taskbar_keeper(Arc::clone(&taskbar_flag));
 
+        let tray = match tray::Tray::new(&cc.egui_ctx) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                eprintln!("tray icon: {e}");
+                None
+            }
+        };
+
         Self {
-            menu: None,
             shared,
             refresh_tx,
             cfg,
@@ -287,6 +278,7 @@ impl WidgetApp {
             last_save_at: None,
             quit_pending: false,
             taskbar_flag,
+            tray,
         }
     }
 
@@ -299,208 +291,132 @@ impl WidgetApp {
         }
     }
 
-    /// Right-click menu items. Viewport commands always target the main window,
-    /// so this works both in an inline context menu and in the popup window.
-    /// Returns true when the menu should close.
-    fn menu_items(
-        &mut self,
-        ui: &mut egui::Ui,
-        ctx: &egui::Context,
-        taskbar_mode: bool,
-        root_outer: Option<Rect>,
-    ) -> bool {
-        let mut close = false;
-        if ui.button("Refresh now").clicked() {
-            let _ = self.refresh_tx.send(());
-            close = true;
-        }
-
-        let mut on_top = self.cfg.lock().map(|c| c.always_on_top).unwrap_or(true);
-        if ui
-            .add_enabled(
-                !taskbar_mode,
-                egui::Checkbox::new(&mut on_top, "Always on top"),
-            )
-            .changed()
-        {
-            self.save_config_with(|c| c.always_on_top = on_top);
-            let level = if on_top {
-                egui::WindowLevel::AlwaysOnTop
-            } else {
-                egui::WindowLevel::Normal
-            };
-            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::WindowLevel(level));
-            if let Some(outer) = root_outer {
-                self.save_window_fields(outer.min.x, outer.min.y, on_top);
-            }
-            close = true;
-        }
-
-        let mut layout_horizontal = self
-            .cfg
-            .lock()
-            .map(|c| c.layout == Layout::Horizontal)
-            .unwrap_or(false);
-        if ui
-            .add_enabled(
-                !taskbar_mode,
-                egui::Checkbox::new(&mut layout_horizontal, "Horizontal layout"),
-            )
-            .changed()
-        {
-            let was_horizontal = self
-                .cfg
-                .lock()
-                .map(|c| is_horizontal(&c))
-                .unwrap_or(false);
-            self.save_config_with(|c| {
-                c.layout = if layout_horizontal {
-                    Layout::Horizontal
-                } else {
-                    Layout::Vertical
-                };
-            });
-            let now_horizontal = layout_horizontal;
-            if was_horizontal != now_horizontal {
-                if now_horizontal {
-                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::MinInnerSize(Vec2::new(
-                        80.0, 30.0,
-                    )));
-                } else {
-                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::MinInnerSize(Vec2::new(
-                        200.0, 60.0,
-                    )));
-                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::InnerSize(Vec2::new(
-                        280.0, 150.0,
-                    )));
-                }
-            }
-            close = true;
-        }
-
-        let mut tb_mode = taskbar_mode;
-        if ui
-            .checkbox(&mut tb_mode, "Taskbar mode")
-            .changed()
-        {
-            let was_horizontal = self
-                .cfg
-                .lock()
-                .map(|c| is_horizontal(&c))
-                .unwrap_or(false);
-            let on = tb_mode;
-            self.save_config_with(|c| {
-                c.taskbar_mode = on;
-                if on {
-                    c.always_on_top = true;
-                }
-            });
-            let now_horizontal = self
-                .cfg
-                .lock()
-                .map(|c| is_horizontal(&c))
-                .unwrap_or(false);
-            if was_horizontal != now_horizontal {
-                if now_horizontal {
-                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::MinInnerSize(Vec2::new(
-                        80.0, 30.0,
-                    )));
-                } else {
-                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::MinInnerSize(Vec2::new(
-                        200.0, 60.0,
-                    )));
-                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::InnerSize(Vec2::new(
-                        280.0, 150.0,
-                    )));
-                }
-            }
-            self.taskbar_flag.store(on, Ordering::Relaxed);
-            if on {
-                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::WindowLevel(
-                    egui::WindowLevel::AlwaysOnTop,
-                ));
-            }
-            close = true;
-        }
-
-        if ui.button("Open config file").clicked() {
-            if let Some(path) = config::config_path() {
-                let _ = std::process::Command::new("notepad.exe")
-                    .arg(path)
-                    .spawn();
-            }
-            close = true;
-        }
-
-        if ui.button("Quit").clicked() {
-            if let Some(outer) = root_outer {
-                let on_top = self.cfg.lock().map(|c| c.always_on_top).unwrap_or(true);
-                self.save_window_fields(outer.min.x, outer.min.y, on_top);
-            }
-            self.quit_pending = true;
-            close = true;
-        }
-        close
+    fn action_refresh(&self) {
+        let _ = self.refresh_tx.send(());
     }
 
-    fn show_popup_menu(&mut self, ctx: &egui::Context, taskbar_mode: bool) {
-        let Some(menu) = self.menu.as_ref() else {
-            return;
+    fn action_set_always_on_top(
+        &mut self,
+        ctx: &egui::Context,
+        on: bool,
+        root_outer: Option<Rect>,
+    ) {
+        self.save_config_with(|c| c.always_on_top = on);
+        let level = if on {
+            egui::WindowLevel::AlwaysOnTop
+        } else {
+            egui::WindowLevel::Normal
         };
-        let size = menu.size;
-        let pos = menu.position();
-        let root_outer = ctx.input(|i| i.viewport().outer_rect);
+        ctx.send_viewport_cmd_to(
+            egui::ViewportId::ROOT,
+            egui::ViewportCommand::WindowLevel(level),
+        );
+        if let Some(outer) = root_outer {
+            self.save_window_fields(outer.min.x, outer.min.y, on);
+        }
+    }
 
-        let builder = egui::ViewportBuilder::default()
-            .with_title("AI Usage menu")
-            .with_decorations(false)
-            .with_resizable(false)
-            .with_taskbar(false)
-            .with_always_on_top()
-            .with_active(true)
-            .with_position(pos)
-            .with_inner_size(size);
-
-        let menu_id = egui::ViewportId::from_hash_of("ai-usage-popup-menu");
-        let (close, measured) = ctx.show_viewport_immediate(menu_id, builder, |ctx, _class| {
-            let frame = egui::Frame::new()
-                .fill(Color32::from_rgb(27, 27, 32))
-                .stroke(egui::Stroke::new(1.0, Color32::from_gray(70)))
-                .corner_radius(6.0)
-                .inner_margin(6.0);
-            let mut close = false;
-            let mut measured = None;
-            egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
-                let inner = ui.vertical(|ui| self.menu_items(ui, ctx, taskbar_mode, root_outer));
-                close = inner.inner;
-                // Content plus the frame's margin and stroke on both sides.
-                measured = Some(inner.response.rect.size() + Vec2::splat(2.0 * 7.0));
-            });
-
-            let (focused, escape) = ctx.input(|i| {
-                (i.viewport().focused, i.key_pressed(egui::Key::Escape))
-            });
-            if let Some(m) = self.menu.as_mut() {
-                if focused == Some(true) {
-                    m.seen_focus = true;
-                } else if m.seen_focus && focused == Some(false) {
-                    close = true;
-                }
-            }
-            (close || escape, measured)
-        });
-
-        if close {
-            self.menu = None;
+    fn action_set_layout(&mut self, ctx: &egui::Context, layout: Layout) {
+        if self
+            .cfg
+            .lock()
+            .map(|c| c.taskbar_mode && layout == Layout::Vertical)
+            .unwrap_or(false)
+        {
             return;
         }
-        if let (Some(m), Some(measured)) = (self.menu.as_mut(), measured) {
-            let measured = measured.ceil();
-            if (measured - m.size).length() > 1.0 {
-                m.size = measured;
-                ctx.request_repaint();
+        let was_horizontal = self
+            .cfg
+            .lock()
+            .map(|c| is_horizontal(&c))
+            .unwrap_or(false);
+        self.save_config_with(|c| c.layout = layout);
+        let now_horizontal = self
+            .cfg
+            .lock()
+            .map(|c| is_horizontal(&c))
+            .unwrap_or(false);
+        if was_horizontal != now_horizontal {
+            if now_horizontal {
+                ctx.send_viewport_cmd_to(
+                    egui::ViewportId::ROOT,
+                    egui::ViewportCommand::MinInnerSize(Vec2::new(80.0, 30.0)),
+                );
+            } else {
+                ctx.send_viewport_cmd_to(
+                    egui::ViewportId::ROOT,
+                    egui::ViewportCommand::MinInnerSize(Vec2::new(200.0, 60.0)),
+                );
+                ctx.send_viewport_cmd_to(
+                    egui::ViewportId::ROOT,
+                    egui::ViewportCommand::InnerSize(Vec2::new(280.0, 150.0)),
+                );
             }
         }
+    }
+
+    fn action_set_taskbar_mode(&mut self, ctx: &egui::Context, on: bool) {
+        let was_horizontal = self
+            .cfg
+            .lock()
+            .map(|c| is_horizontal(&c))
+            .unwrap_or(false);
+        self.save_config_with(|c| {
+            c.taskbar_mode = on;
+            if on {
+                c.always_on_top = true;
+            }
+        });
+        let now_horizontal = self
+            .cfg
+            .lock()
+            .map(|c| is_horizontal(&c))
+            .unwrap_or(false);
+        if was_horizontal != now_horizontal {
+            if now_horizontal {
+                ctx.send_viewport_cmd_to(
+                    egui::ViewportId::ROOT,
+                    egui::ViewportCommand::MinInnerSize(Vec2::new(80.0, 30.0)),
+                );
+            } else {
+                ctx.send_viewport_cmd_to(
+                    egui::ViewportId::ROOT,
+                    egui::ViewportCommand::MinInnerSize(Vec2::new(200.0, 60.0)),
+                );
+                ctx.send_viewport_cmd_to(
+                    egui::ViewportId::ROOT,
+                    egui::ViewportCommand::InnerSize(Vec2::new(280.0, 150.0)),
+                );
+            }
+        }
+        self.taskbar_flag.store(on, Ordering::Relaxed);
+        if on {
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop),
+            );
+        }
+    }
+
+    fn action_open_config(&self) {
+        if let Some(path) = config::config_path() {
+            let _ = std::process::Command::new("notepad.exe")
+                .arg(path)
+                .spawn();
+        }
+    }
+
+    fn action_quit(&mut self, root_outer: Option<Rect>) {
+        if let Some(outer) = root_outer {
+            let on_top = self.cfg.lock().map(|c| c.always_on_top).unwrap_or(true);
+            self.save_window_fields(outer.min.x, outer.min.y, on_top);
+        }
+        self.quit_pending = true;
+    }
+
+    fn action_set_transparent_background(&mut self, ctx: &egui::Context, on: bool) {
+        self.save_config_with(|c| c.transparent_background = on);
+        ctx.request_repaint();
     }
 
     fn snap_to_taskbar(&self, ctx: &egui::Context) {
@@ -594,23 +510,94 @@ impl eframe::App for WidgetApp {
             return;
         }
 
-        let (horizontal, taskbar_mode) = self
+        let tray_actions = self.tray.as_ref().map(|t| t.poll_actions());
+        let mut quit_from_tray = false;
+        if let Some(actions) = tray_actions {
+            let root_outer = ctx.input(|i| i.viewport().outer_rect);
+            for action in actions {
+                let (always_on_top, taskbar_mode, transparent_background) = self
+                    .cfg
+                    .lock()
+                    .map(|c| (c.always_on_top, c.taskbar_mode, c.transparent_background))
+                    .unwrap_or((true, false, false));
+                match action {
+                    tray::TrayAction::Refresh => self.action_refresh(),
+                    tray::TrayAction::ToggleAlwaysOnTop if !taskbar_mode => {
+                        self.action_set_always_on_top(ctx, !always_on_top, root_outer);
+                    }
+                    tray::TrayAction::SetLayout(layout) => self.action_set_layout(ctx, layout),
+                    tray::TrayAction::ToggleTaskbarMode => {
+                        self.action_set_taskbar_mode(ctx, !taskbar_mode);
+                    }
+                    tray::TrayAction::ToggleTransparent => {
+                        self.action_set_transparent_background(ctx, !transparent_background);
+                    }
+                    tray::TrayAction::ToggleAlwaysOnTop => {}
+                    tray::TrayAction::OpenConfig => self.action_open_config(),
+                    tray::TrayAction::Quit => {
+                        self.action_quit(root_outer);
+                        quit_from_tray = true;
+                    }
+                }
+            }
+        }
+        if quit_from_tray {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        if let Some(tray) = self.tray.as_ref() {
+            let (always_on_top, layout, taskbar_mode, transparent_background) = self
+                .cfg
+                .lock()
+                .map(|c| {
+                    let layout = c.layout;
+                    let effective = if c.taskbar_mode && layout == Layout::Vertical {
+                        Layout::Horizontal
+                    } else {
+                        layout
+                    };
+                    (
+                        c.always_on_top,
+                        effective,
+                        c.taskbar_mode,
+                        c.transparent_background,
+                    )
+                })
+                .unwrap_or((true, Layout::Vertical, false, false));
+            tray.sync(
+                always_on_top,
+                layout,
+                taskbar_mode,
+                transparent_background,
+            );
+        }
+
+        let (horizontal, taskbar_mode, transparent_background, layout) = self
             .cfg
             .lock()
-            .map(|c| (is_horizontal(&c), c.taskbar_mode))
-            .unwrap_or((false, false));
+            .map(|c| (is_horizontal(&c), c.taskbar_mode, c.transparent_background, c.layout))
+            .unwrap_or((false, false, false, Layout::Vertical));
+
+        let (fill, stroke) = if transparent_background {
+            (Color32::TRANSPARENT, egui::Stroke::NONE)
+        } else {
+            (
+                Color32::from_rgba_unmultiplied(18, 18, 22, 245),
+                egui::Stroke::new(1.0, Color32::from_gray(55)),
+            )
+        };
 
         let panel_frame = if horizontal {
             egui::Frame::new()
-                .fill(Color32::from_rgba_unmultiplied(18, 18, 22, 245))
-                .stroke(egui::Stroke::new(1.0, Color32::from_gray(55)))
-                .corner_radius(6.0)
+                .fill(fill)
+                .stroke(stroke)
+                .corner_radius(3.0)
                 .inner_margin(4.0)
         } else {
             egui::Frame::new()
-                .fill(Color32::from_rgba_unmultiplied(18, 18, 22, 245))
-                .stroke(egui::Stroke::new(1.0, Color32::from_gray(55)))
-                .corner_radius(8.0)
+                .fill(fill)
+                .stroke(stroke)
+                .corner_radius(4.0)
                 .inner_margin(8.0)
         };
 
@@ -627,33 +614,6 @@ impl eframe::App for WidgetApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
 
-            if horizontal {
-                // The strip is too short to hold an inline menu (it would be
-                // clipped), so open it in its own popup window instead.
-                if bg.secondary_clicked() {
-                    let pointer = ctx.input(|i| i.pointer.interact_pos());
-                    if let (Some(outer), Some(p)) =
-                        (ctx.input(|i| i.viewport().outer_rect), pointer)
-                    {
-                        self.menu = Some(PopupMenu {
-                            anchor_x: outer.min.x + p.x,
-                            strip: outer,
-                            size: MENU_SIZE_ESTIMATE,
-                            seen_focus: false,
-                        });
-                    }
-                } else if bg.clicked() {
-                    self.menu = None;
-                }
-            } else {
-                bg.context_menu(|ui| {
-                    let root_outer = ctx.input(|i| i.viewport().outer_rect);
-                    if self.menu_items(ui, ctx, taskbar_mode, root_outer) {
-                        ui.close();
-                    }
-                });
-            }
-
             let (claude, cursor, refreshing) = {
                 let s = self.shared.lock().expect("shared lock");
                 (s.claude.clone(), s.cursor.clone(), s.refreshing)
@@ -662,8 +622,15 @@ impl eframe::App for WidgetApp {
             let now = Utc::now();
 
             if horizontal {
-                compact_rect =
-                    compact::draw_compact(ui, claude.as_ref(), cursor.as_ref(), now, refreshing);
+                let (r, refresh_clicked) = if layout == Layout::Rings {
+                    compact::draw_rings(ui, claude.as_ref(), cursor.as_ref(), now, refreshing)
+                } else {
+                    compact::draw_compact(ui, claude.as_ref(), cursor.as_ref(), now, refreshing)
+                };
+                compact_rect = r;
+                if refresh_clicked {
+                    self.action_refresh();
+                }
             } else {
                 let header_font = FontId::proportional(13.0);
                 let body_font = FontId::proportional(12.0);
@@ -684,16 +651,43 @@ impl eframe::App for WidgetApp {
                                 .color(Color32::GRAY)
                                 .small(),
                             );
-                            if refreshing {
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        ui.label(
-                                            egui::RichText::new("⟳").color(Color32::GRAY).small(),
-                                        );
-                                    },
-                                );
-                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let sense = if refreshing {
+                                        Sense::hover()
+                                    } else {
+                                        Sense::click()
+                                    };
+                                    let (rect, response) =
+                                        ui.allocate_exact_size(Vec2::new(14.0, 14.0), sense);
+                                    let color = if refreshing {
+                                        Color32::from_gray(80)
+                                    } else if response.hovered() {
+                                        ui.visuals().strong_text_color()
+                                    } else {
+                                        Color32::GRAY
+                                    };
+                                    let refresh_clicked = if refreshing {
+                                        false
+                                    } else {
+                                        response.clicked()
+                                    };
+                                    if !refreshing && response.hovered() {
+                                        response.on_hover_text("Refresh now");
+                                    }
+                                    ui.painter().text(
+                                        rect.center(),
+                                        Align2::CENTER_CENTER,
+                                        "⟳",
+                                        FontId::proportional(11.0),
+                                        color,
+                                    );
+                                    if refresh_clicked {
+                                        self.action_refresh();
+                                    }
+                                },
+                            );
                         });
                     })
                     .response
@@ -701,11 +695,6 @@ impl eframe::App for WidgetApp {
                 content_bottom = content_rect.max.y;
             }
         });
-
-        if !horizontal {
-            self.menu = None;
-        }
-        self.show_popup_menu(ctx, taskbar_mode);
 
         if horizontal {
             let desired = Vec2::new(
@@ -912,5 +901,19 @@ mod tests {
             ..Default::default()
         };
         assert!(is_horizontal(&both));
+
+        let rings = Config {
+            layout: Layout::Rings,
+            taskbar_mode: false,
+            ..Default::default()
+        };
+        assert!(is_horizontal(&rings));
+
+        let rings_tb = Config {
+            layout: Layout::Rings,
+            taskbar_mode: true,
+            ..Default::default()
+        };
+        assert!(is_horizontal(&rings_tb));
     }
 }

@@ -4,6 +4,7 @@ mod claude;
 mod config;
 mod cursor;
 mod model;
+mod single_instance;
 mod taskbar;
 mod ui;
 
@@ -57,6 +58,10 @@ fn main() {
         print_once(&cfg);
         std::process::exit(0);
     }
+
+    let Some(_instance) = single_instance::acquire() else {
+        return;
+    };
 
     if let Err(e) = ui::run(cfg) {
         eprintln!("{e}");

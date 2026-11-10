@@ -7,6 +7,7 @@ pub enum Layout {
     #[default]
     Vertical,
     Horizontal,
+    Rings,
 }
 
 impl Serialize for Layout {
@@ -17,6 +18,7 @@ impl Serialize for Layout {
         match self {
             Layout::Vertical => serializer.serialize_str("vertical"),
             Layout::Horizontal => serializer.serialize_str("horizontal"),
+            Layout::Rings => serializer.serialize_str("rings"),
         }
     }
 }
@@ -31,6 +33,9 @@ impl<'de> Deserialize<'de> for Layout {
             serde_json::Value::String(s) if s.trim().eq_ignore_ascii_case("horizontal") => {
                 Layout::Horizontal
             }
+            serde_json::Value::String(s) if s.trim().eq_ignore_ascii_case("rings") => {
+                Layout::Rings
+            }
             _ => Layout::Vertical,
         })
     }
@@ -44,10 +49,12 @@ pub struct Config {
     pub window_y: Option<f32>,
     pub always_on_top: bool,
     pub poll_seconds: u64,
-    /// "vertical" (default) or "horizontal" compact strip.
+    /// `"vertical"` (default), `"horizontal"`, or `"rings"` compact strip.
     pub layout: Layout,
     /// Dock a horizontal strip over the Windows taskbar (implies horizontal layout).
     pub taskbar_mode: bool,
+    /// Draw no panel background or border.
+    pub transparent_background: bool,
 }
 
 impl Default for Config {
@@ -60,6 +67,7 @@ impl Default for Config {
             poll_seconds: 120,
             layout: Layout::Vertical,
             taskbar_mode: false,
+            transparent_background: false,
         }
     }
 }
@@ -109,6 +117,14 @@ mod tests {
         assert_eq!(cfg.poll_seconds, 120);
         assert_eq!(cfg.layout, Layout::Vertical);
         assert!(!cfg.taskbar_mode);
+        assert!(!cfg.transparent_background);
+    }
+
+    #[test]
+    fn deserializes_transparent_background() {
+        let cfg: Config =
+            serde_json::from_str(r#"{"transparent_background":true}"#).unwrap();
+        assert!(cfg.transparent_background);
     }
 
     #[test]
@@ -159,5 +175,23 @@ mod tests {
         .unwrap();
         assert_eq!(value["layout"], "horizontal");
         assert_eq!(value["taskbar_mode"], false);
+    }
+
+    #[test]
+    fn layout_rings_round_trip() {
+        let value = serde_json::to_value(Config {
+            layout: Layout::Rings,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(value["layout"], "rings");
+        let cfg: Config = serde_json::from_value(value).unwrap();
+        assert_eq!(cfg.layout, Layout::Rings);
+    }
+
+    #[test]
+    fn layout_rings_case_insensitive() {
+        let cfg: Config = serde_json::from_str(r#"{"layout":"RINGS"}"#).unwrap();
+        assert_eq!(cfg.layout, Layout::Rings);
     }
 }

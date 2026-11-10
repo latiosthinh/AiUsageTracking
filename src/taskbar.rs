@@ -46,6 +46,12 @@ pub fn keep_on_top(hwnd: isize) {
     keep_on_top_impl(hwnd);
 }
 
+/// Make `hwnd` an owned window of the taskbar (`owned = true`) so it always stays above it,
+/// or clear the owner (`owned = false`). No-op when already in the requested state.
+pub fn set_owned_by_taskbar(hwnd: isize, owned: bool) {
+    set_owned_by_taskbar_impl(hwnd, owned);
+}
+
 /// Show (without activating) or hide the window, asynchronously.
 pub fn set_visible(hwnd: isize, visible: bool) {
     set_visible_impl(hwnd, visible);
@@ -322,6 +328,41 @@ fn keep_on_top_impl(hwnd: isize) {
 }
 
 #[cfg(windows)]
+fn set_owned_by_taskbar_impl(hwnd: isize, owned: bool) {
+    #[link(name = "user32")]
+    extern "system" {
+        fn FindWindowW(lp_class_name: *const u16, lp_window_name: *const u16) -> isize;
+        fn GetWindowLongPtrW(h_wnd: isize, n_index: i32) -> isize;
+        fn SetWindowLongPtrW(h_wnd: isize, n_index: i32, dw_new_long: isize) -> isize;
+    }
+
+    const GWLP_HWNDPARENT: i32 = -8;
+
+    let desired = if owned {
+        let tray_class = wide("Shell_TrayWnd");
+        // SAFETY: `tray_class` is a valid NUL-terminated wide string.
+        let taskbar = unsafe { FindWindowW(tray_class.as_ptr(), std::ptr::null()) };
+        if taskbar == 0 {
+            return;
+        }
+        taskbar
+    } else {
+        0
+    };
+
+    // SAFETY: `hwnd` is expected to be a valid window handle from the caller.
+    let current = unsafe { GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT) };
+    if current == desired {
+        return;
+    }
+
+    // SAFETY: `hwnd` is expected to be a valid window handle from the caller.
+    unsafe {
+        SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, desired);
+    }
+}
+
+#[cfg(windows)]
 fn set_visible_impl(hwnd: isize, visible: bool) {
     #[link(name = "user32")]
     extern "system" {
@@ -373,6 +414,9 @@ fn find_own_window_impl() -> Option<isize> {
 
 #[cfg(not(windows))]
 fn keep_on_top_impl(_hwnd: isize) {}
+
+#[cfg(not(windows))]
+fn set_owned_by_taskbar_impl(_hwnd: isize, _owned: bool) {}
 
 #[cfg(not(windows))]
 fn set_visible_impl(_hwnd: isize, _visible: bool) {}
