@@ -7,6 +7,18 @@ use crate::model::{format_countdown, Meter, ProviderSnapshot, ProviderStatus, Se
 pub const ROW_HEIGHT: f32 = 16.0;
 pub const MAX_METERS: usize = 3;
 
+fn icons_percent_font() -> FontId {
+    FontId::proportional(10.0)
+}
+
+fn icons_column_width(ui: &egui::Ui) -> f32 {
+    let font = icons_percent_font();
+    let color = ui.visuals().text_color();
+    ui.fonts(|f| f.layout_no_wrap("100%".into(), font, color).size().x)
+        .ceil()
+        + 2.0
+}
+
 fn body_font() -> FontId {
     FontId::proportional(11.0)
 }
@@ -231,27 +243,44 @@ fn paint_icons_status_cell(
     r
 }
 
-fn paint_bar(
+fn paint_icons_column(
     ui: &mut egui::Ui,
     provider: &str,
     m: &Meter,
     now: DateTime<Utc>,
     height: f32,
+    col_w: f32,
 ) -> Rect {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(6.0, height), Sense::hover());
-    let bar_h = (height - 4.0).max(1.0);
-    let bar = Rect::from_center_size(rect.center(), egui::vec2(6.0, bar_h));
+    let font = icons_percent_font();
+    let text_color = ui.visuals().text_color();
+    let pct_text = format!("{:.0}%", m.percent);
+    let text_galley = ui
+        .painter()
+        .layout_no_wrap(pct_text, font, text_color);
+    let text_h = text_galley.size().y;
+    let gap = 2.0;
+
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(col_w, height), Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(bar, 1.5, Color32::from_gray(60));
-    let fill_h = bar_h * (m.percent / 100.0).clamp(0.0, 1.0);
+
+    let text_x = rect.center().x - text_galley.size().x / 2.0;
+    painter.galley(egui::pos2(text_x, rect.min.y), text_galley, text_color);
+
+    let bar_top = rect.min.y + text_h + gap;
+    let bar_rect = Rect::from_min_max(
+        egui::pos2(rect.min.x, bar_top),
+        egui::pos2(rect.max.x, rect.max.y),
+    );
+    painter.rect_filled(bar_rect, 0.0, Color32::from_gray(60));
+    let fill_h = bar_rect.height() * (m.percent / 100.0).clamp(0.0, 1.0);
     if fill_h > 0.0 {
         let fill_rect = Rect::from_min_size(
-            egui::pos2(bar.min.x, bar.max.y - fill_h),
-            egui::vec2(bar.width(), fill_h),
+            egui::pos2(bar_rect.min.x, bar_rect.max.y - fill_h),
+            egui::vec2(bar_rect.width(), fill_h),
         );
         painter.rect_filled(
             fill_rect,
-            1.5,
+            0.0,
             super::severity_color(Severity::from_percent(m.percent)),
         );
     }
@@ -295,6 +324,7 @@ fn draw_icons_provider(
     icon: egui::ImageSource<'static>,
     icon_size: egui::Vec2,
     height: f32,
+    col_w: f32,
 ) -> Rect {
     let icon_resp = paint_svg_icon(ui, icon, icon_size, height);
     let mut union = icon_resp.rect;
@@ -337,7 +367,7 @@ fn draw_icons_provider(
                         if i > 0 {
                             ui.add_space(3.0);
                         }
-                        union = union.union(paint_bar(ui, provider, m, now, height));
+                        union = union.union(paint_icons_column(ui, provider, m, now, height, col_w));
                     }
                 }
                 ProviderStatus::Stale(msg) => {
@@ -346,7 +376,7 @@ fn draw_icons_provider(
                         if i > 0 {
                             ui.add_space(3.0);
                         }
-                        union = union.union(paint_bar(ui, provider, m, now, height));
+                        union = union.union(paint_icons_column(ui, provider, m, now, height, col_w));
                     }
                     let amber = Color32::from_rgb(255, 179, 0);
                     union = union.union(paint_icons_status_cell(
@@ -377,6 +407,7 @@ pub fn draw_icons(
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
+        let col_w = icons_column_width(ui);
 
         union = union.union(draw_icons_provider(
             ui,
@@ -386,6 +417,7 @@ pub fn draw_icons(
             egui::include_image!("../../assets/claude.svg"),
             egui::vec2(24.0, 15.0),
             height,
+            col_w,
         ));
 
         ui.add_space(10.0);
@@ -398,6 +430,7 @@ pub fn draw_icons(
             egui::include_image!("../../assets/cursor.svg"),
             egui::vec2(14.0, 16.0),
             height,
+            col_w,
         ));
     });
 
@@ -629,5 +662,40 @@ mod tests {
         });
 
         assert!(rect.width() < 120.0);
+    }
+
+    #[test]
+    fn draw_icons_columns_fit_percent_text() {
+        let now = Utc::now();
+        let claude = ProviderSnapshot {
+            name: "Claude",
+            plan: None,
+            meters: vec![Meter {
+                label: "5h".into(),
+                percent: 100.0,
+                detail: None,
+                resets_at: None,
+            }],
+            status: ProviderStatus::Ok,
+            fetched_at: now,
+        };
+
+        let ctx = icons_ctx();
+        let mut rect = Rect::NOTHING;
+        let icon_w = 24.0_f32;
+        let mut pct_w = 0.0_f32;
+        let _ = ctx.run(RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let font = icons_percent_font();
+                let color = ui.visuals().text_color();
+                pct_w = ui
+                    .fonts(|f| f.layout_no_wrap("100%".into(), font, color).size().x)
+                    .ceil();
+                let r = draw_icons(ui, Some(&claude), None, now, 40.0);
+                rect = r;
+            });
+        });
+
+        assert!(rect.width() >= icon_w + 4.0 + pct_w);
     }
 }

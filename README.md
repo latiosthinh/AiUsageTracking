@@ -33,7 +33,7 @@ Location: `%APPDATA%\ai-usage-widget\config.json` (created on first run).
 | `window_x`, `window_y` | Last window position |
 | `always_on_top` | Keep the widget above other windows |
 | `poll_seconds` | Refresh interval (clamped to at least 30) |
-| `layout` | `"vertical"` (default), `"horizontal"` (two-row strip), or `"icons"` (one row: Claude crab and Cursor logos with small vertical usage bars; hover for details; in taskbar mode the strip matches the taskbar height). `"rings"` is still accepted. |
+| `layout` | `"vertical"` (default), `"horizontal"` (two-row strip), or `"icons"` (one row: Claude crab and Cursor logos with vertical usage bars; each bar shows its percentage above it; hover for details; in taskbar mode the strip matches the taskbar height). `"rings"` is still accepted. |
 | `taskbar_mode` | `true` docks the strip over the taskbar (implies horizontal layout and always on top) |
 | `transparent_background` | `true` removes the panel background and border; also in the tray menu |
 
