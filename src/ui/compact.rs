@@ -362,19 +362,19 @@ fn draw_icons_provider(
                     ));
                 }
                 ProviderStatus::Ok => {
-                    ui.add_space(4.0);
+                    ui.add_space(6.0);
                     for (i, m) in s.meters.iter().take(MAX_METERS).enumerate() {
                         if i > 0 {
-                            ui.add_space(3.0);
+                            ui.add_space(4.0);
                         }
                         union = union.union(paint_icons_column(ui, provider, m, now, height, col_w));
                     }
                 }
                 ProviderStatus::Stale(msg) => {
-                    ui.add_space(4.0);
+                    ui.add_space(6.0);
                     for (i, m) in s.meters.iter().take(MAX_METERS).enumerate() {
                         if i > 0 {
-                            ui.add_space(3.0);
+                            ui.add_space(4.0);
                         }
                         union = union.union(paint_icons_column(ui, provider, m, now, height, col_w));
                     }
@@ -420,7 +420,7 @@ pub fn draw_icons(
             col_w,
         ));
 
-        ui.add_space(10.0);
+        ui.add_space(24.0);
 
         union = union.union(draw_icons_provider(
             ui,
@@ -661,7 +661,7 @@ mod tests {
             });
         });
 
-        assert!(rect.width() < 120.0);
+        assert!(rect.width() < 134.0);
     }
 
     #[test]
@@ -696,6 +696,6 @@ mod tests {
             });
         });
 
-        assert!(rect.width() >= icon_w + 4.0 + pct_w);
+        assert!(rect.width() >= icon_w + 6.0 + pct_w);
     }
 }
