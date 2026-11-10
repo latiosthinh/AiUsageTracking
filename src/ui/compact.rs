@@ -5,7 +5,6 @@ use egui::FontId;
 use crate::model::{format_countdown, Meter, ProviderSnapshot, ProviderStatus, Severity};
 
 pub const ROW_HEIGHT: f32 = 16.0;
-pub const ICONS_HEIGHT: f32 = 22.0;
 pub const MAX_METERS: usize = 3;
 
 fn body_font() -> FontId {
@@ -198,9 +197,9 @@ fn paint_svg_icon(
     ui: &mut egui::Ui,
     source: egui::ImageSource<'static>,
     size: egui::Vec2,
+    height: f32,
 ) -> egui::Response {
-    let (slot, response) =
-        ui.allocate_exact_size(egui::vec2(size.x, ICONS_HEIGHT), Sense::hover());
+    let (slot, response) = ui.allocate_exact_size(egui::vec2(size.x, height), Sense::hover());
     let image_rect = Rect::from_center_size(slot.center(), size);
     let mut icon_ui = ui.new_child(egui::UiBuilder::new().max_rect(image_rect));
     let _ = icon_ui.add(
@@ -211,12 +210,40 @@ fn paint_svg_icon(
     response
 }
 
-fn paint_bar(ui: &mut egui::Ui, provider: &str, m: &Meter, now: DateTime<Utc>) -> Rect {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(6.0, ICONS_HEIGHT), Sense::hover());
-    let bar = Rect::from_center_size(rect.center(), egui::vec2(6.0, 18.0));
+fn paint_icons_status_cell(
+    ui: &mut egui::Ui,
+    text: &str,
+    color: Color32,
+    hover: Option<&str>,
+    height: f32,
+) -> Rect {
+    let font = body_font();
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font.clone(), color);
+    let size = egui::vec2(galley.size().x, height);
+    let (r, response) = ui.allocate_exact_size(size, Sense::hover());
+    let pos = egui::pos2(r.left(), r.center().y - galley.size().y / 2.0);
+    ui.painter().galley(pos, galley, color);
+    if let Some(tip) = hover {
+        super::tooltip::set(&response, tip);
+    }
+    r
+}
+
+fn paint_bar(
+    ui: &mut egui::Ui,
+    provider: &str,
+    m: &Meter,
+    now: DateTime<Utc>,
+    height: f32,
+) -> Rect {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(6.0, height), Sense::hover());
+    let bar_h = (height - 4.0).max(1.0);
+    let bar = Rect::from_center_size(rect.center(), egui::vec2(6.0, bar_h));
     let painter = ui.painter();
     painter.rect_filled(bar, 1.5, Color32::from_gray(60));
-    let fill_h = 18.0 * (m.percent / 100.0).clamp(0.0, 1.0);
+    let fill_h = bar_h * (m.percent / 100.0).clamp(0.0, 1.0);
     if fill_h > 0.0 {
         let fill_rect = Rect::from_min_size(
             egui::pos2(bar.min.x, bar.max.y - fill_h),
@@ -267,24 +294,42 @@ fn draw_icons_provider(
     now: DateTime<Utc>,
     icon: egui::ImageSource<'static>,
     icon_size: egui::Vec2,
+    height: f32,
 ) -> Rect {
-    let icon_resp = paint_svg_icon(ui, icon, icon_size);
+    let icon_resp = paint_svg_icon(ui, icon, icon_size, height);
     let mut union = icon_resp.rect;
 
     match snapshot {
         None => {
-            union = union.union(paint_text_cell(ui, "…", Color32::GRAY, Some("Loading")));
+            union = union.union(paint_icons_status_cell(
+                ui,
+                "…",
+                Color32::GRAY,
+                Some("Loading"),
+                height,
+            ));
         }
         Some(s) => {
             super::tooltip::set(&icon_resp, provider_icon_hover(provider, s));
             match &s.status {
                 ProviderStatus::NotSignedIn(msg) => {
-                    union = union.union(paint_text_cell(ui, "⚠", Color32::GRAY, Some(msg.as_str())));
+                    union = union.union(paint_icons_status_cell(
+                        ui,
+                        "⚠",
+                        Color32::GRAY,
+                        Some(msg.as_str()),
+                        height,
+                    ));
                 }
                 ProviderStatus::Error(msg) => {
                     let error_red = Color32::from_rgb(229, 57, 53);
-                    union =
-                        union.union(paint_text_cell(ui, "⚠", error_red, Some(msg.as_str())));
+                    union = union.union(paint_icons_status_cell(
+                        ui,
+                        "⚠",
+                        error_red,
+                        Some(msg.as_str()),
+                        height,
+                    ));
                 }
                 ProviderStatus::Ok => {
                     ui.add_space(4.0);
@@ -292,7 +337,7 @@ fn draw_icons_provider(
                         if i > 0 {
                             ui.add_space(3.0);
                         }
-                        union = union.union(paint_bar(ui, provider, m, now));
+                        union = union.union(paint_bar(ui, provider, m, now, height));
                     }
                 }
                 ProviderStatus::Stale(msg) => {
@@ -301,10 +346,16 @@ fn draw_icons_provider(
                         if i > 0 {
                             ui.add_space(3.0);
                         }
-                        union = union.union(paint_bar(ui, provider, m, now));
+                        union = union.union(paint_bar(ui, provider, m, now, height));
                     }
                     let amber = Color32::from_rgb(255, 179, 0);
-                    union = union.union(paint_text_cell(ui, "⚠", amber, Some(msg.as_str())));
+                    union = union.union(paint_icons_status_cell(
+                        ui,
+                        "⚠",
+                        amber,
+                        Some(msg.as_str()),
+                        height,
+                    ));
                 }
             }
         }
@@ -320,6 +371,7 @@ pub fn draw_icons(
     claude: Option<&ProviderSnapshot>,
     cursor: Option<&ProviderSnapshot>,
     now: DateTime<Utc>,
+    height: f32,
 ) -> egui::Rect {
     let mut union = Rect::NOTHING;
 
@@ -333,6 +385,7 @@ pub fn draw_icons(
             now,
             egui::include_image!("../../assets/claude.svg"),
             egui::vec2(24.0, 15.0),
+            height,
         ));
 
         ui.add_space(10.0);
@@ -344,6 +397,7 @@ pub fn draw_icons(
             now,
             egui::include_image!("../../assets/cursor.svg"),
             egui::vec2(14.0, 16.0),
+            height,
         ));
     });
 
@@ -554,12 +608,12 @@ mod tests {
         let _ = ctx.run(RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.set_width(500.0);
-                let r = draw_icons(ui, Some(&claude), Some(&cursor), now);
+                let r = draw_icons(ui, Some(&claude), Some(&cursor), now, 40.0);
                 rect = r;
             });
         });
 
-        assert!(rect.height() <= 24.0);
+        assert!(rect.height() <= 40.5);
     }
 
     #[test]
@@ -569,7 +623,7 @@ mod tests {
         let mut rect = Rect::NOTHING;
         let _ = ctx.run(RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let r = draw_icons(ui, None, None, now);
+                let r = draw_icons(ui, None, None, now, 40.0);
                 rect = r;
             });
         });

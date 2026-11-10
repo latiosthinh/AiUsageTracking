@@ -626,7 +626,25 @@ impl eframe::App for WidgetApp {
 
             if horizontal {
                 compact_rect = if layout == Layout::Icons {
-                    compact::draw_icons(ui, claude.as_ref(), cursor.as_ref(), now)
+                    let ppp = ui
+                        .ctx()
+                        .input(|i| i.viewport().native_pixels_per_point)
+                        .unwrap_or(1.0);
+                    let icons_height = (if taskbar_mode {
+                        taskbar::taskbar_info()
+                            .map(|info| info.rect.height() as f32 / ppp - 8.0)
+                            .unwrap_or(36.0)
+                    } else {
+                        36.0
+                    })
+                    .clamp(24.0, 64.0);
+                    compact::draw_icons(
+                        ui,
+                        claude.as_ref(),
+                        cursor.as_ref(),
+                        now,
+                        icons_height,
+                    )
                 } else {
                     compact::draw_compact(ui, claude.as_ref(), cursor.as_ref(), now)
                 };
