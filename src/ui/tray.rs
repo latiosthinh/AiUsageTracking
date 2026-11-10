@@ -25,7 +25,7 @@ const ID_ON_TOP: &str = "tray_on_top";
 const ID_LAYOUT: &str = "tray_layout";
 const ID_LAYOUT_VERTICAL: &str = "tray_layout_vertical";
 const ID_LAYOUT_HORIZONTAL: &str = "tray_layout_horizontal";
-const ID_LAYOUT_RINGS: &str = "tray_layout_rings";
+const ID_LAYOUT_ICONS: &str = "tray_layout_icons";
 const ID_TASKBAR: &str = "tray_taskbar";
 const ID_TRANSPARENT: &str = "tray_transparent";
 const ID_OPEN_CONFIG: &str = "tray_open_config";
@@ -38,7 +38,7 @@ pub struct Tray {
     on_top: CheckMenuItem,
     layout_vertical: CheckMenuItem,
     layout_horizontal: CheckMenuItem,
-    layout_rings: CheckMenuItem,
+    layout_icons: CheckMenuItem,
     taskbar: CheckMenuItem,
     transparent: CheckMenuItem,
     open_config: MenuItem,
@@ -72,7 +72,7 @@ impl Tray {
             CheckMenuItem::with_id(ID_LAYOUT_VERTICAL, "Vertical", true, false, None);
         let layout_horizontal =
             CheckMenuItem::with_id(ID_LAYOUT_HORIZONTAL, "Horizontal", true, false, None);
-        let layout_rings = CheckMenuItem::with_id(ID_LAYOUT_RINGS, "Rings", true, false, None);
+        let layout_icons = CheckMenuItem::with_id(ID_LAYOUT_ICONS, "Icons", true, false, None);
         let layout_submenu = Submenu::with_id(ID_LAYOUT, "Layout", true);
         layout_submenu
             .append(&layout_vertical)
@@ -81,7 +81,7 @@ impl Tray {
             .append(&layout_horizontal)
             .map_err(|e| e.to_string())?;
         layout_submenu
-            .append(&layout_rings)
+            .append(&layout_icons)
             .map_err(|e| e.to_string())?;
         let taskbar = CheckMenuItem::with_id(ID_TASKBAR, "Taskbar mode", true, false, None);
         let transparent =
@@ -115,7 +115,7 @@ impl Tray {
             on_top,
             layout_vertical,
             layout_horizontal,
-            layout_rings,
+            layout_icons,
             taskbar,
             transparent,
             open_config,
@@ -156,7 +156,7 @@ impl Tray {
         if self.last_layout.get() != Some(layout) {
             self.layout_vertical.set_checked(layout == Layout::Vertical);
             self.layout_horizontal.set_checked(layout == Layout::Horizontal);
-            self.layout_rings.set_checked(layout == Layout::Rings);
+            self.layout_icons.set_checked(layout == Layout::Icons);
             self.last_layout.set(Some(layout));
         }
         if self.last_taskbar.get() != Some(taskbar_mode) {
@@ -184,8 +184,8 @@ impl Tray {
                 Some(TrayAction::SetLayout(Layout::Vertical))
             } else if id == self.layout_horizontal.id() {
                 Some(TrayAction::SetLayout(Layout::Horizontal))
-            } else if id == self.layout_rings.id() {
-                Some(TrayAction::SetLayout(Layout::Rings))
+            } else if id == self.layout_icons.id() {
+                Some(TrayAction::SetLayout(Layout::Icons))
             } else if id == self.taskbar.id() {
                 Some(TrayAction::ToggleTaskbarMode)
             } else if id == self.transparent.id() {

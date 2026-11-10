@@ -18,6 +18,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 base64 = "0.22"
 eframe = "0.32"
 tray-icon = "0.26.1"
+egui_extras = { version = "0.32", default-features = false, features = ["svg"] }
 
 [profile.release]
 opt-level = "s"

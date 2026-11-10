@@ -4,6 +4,7 @@ mod claude;
 mod config;
 mod cursor;
 mod model;
+mod snapshot_cache;
 mod single_instance;
 mod taskbar;
 mod ui;

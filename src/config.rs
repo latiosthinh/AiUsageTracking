@@ -7,7 +7,7 @@ pub enum Layout {
     #[default]
     Vertical,
     Horizontal,
-    Rings,
+    Icons,
 }
 
 impl Serialize for Layout {
@@ -18,7 +18,7 @@ impl Serialize for Layout {
         match self {
             Layout::Vertical => serializer.serialize_str("vertical"),
             Layout::Horizontal => serializer.serialize_str("horizontal"),
-            Layout::Rings => serializer.serialize_str("rings"),
+            Layout::Icons => serializer.serialize_str("icons"),
         }
     }
 }
@@ -33,8 +33,11 @@ impl<'de> Deserialize<'de> for Layout {
             serde_json::Value::String(s) if s.trim().eq_ignore_ascii_case("horizontal") => {
                 Layout::Horizontal
             }
-            serde_json::Value::String(s) if s.trim().eq_ignore_ascii_case("rings") => {
-                Layout::Rings
+            serde_json::Value::String(s)
+                if s.trim().eq_ignore_ascii_case("icons")
+                    || s.trim().eq_ignore_ascii_case("rings") =>
+            {
+                Layout::Icons
             }
             _ => Layout::Vertical,
         })
@@ -49,7 +52,8 @@ pub struct Config {
     pub window_y: Option<f32>,
     pub always_on_top: bool,
     pub poll_seconds: u64,
-    /// `"vertical"` (default), `"horizontal"`, or `"rings"` compact strip.
+    /// `"vertical"` (default), `"horizontal"`, or `"icons"` one-row strip.
+    /// Legacy `"rings"` is accepted and parsed as icons.
     pub layout: Layout,
     /// Dock a horizontal strip over the Windows taskbar (implies horizontal layout).
     pub taskbar_mode: bool,
@@ -178,20 +182,30 @@ mod tests {
     }
 
     #[test]
-    fn layout_rings_round_trip() {
+    fn layout_icons_round_trip() {
         let value = serde_json::to_value(Config {
-            layout: Layout::Rings,
+            layout: Layout::Icons,
             ..Default::default()
         })
         .unwrap();
-        assert_eq!(value["layout"], "rings");
+        assert_eq!(value["layout"], "icons");
         let cfg: Config = serde_json::from_value(value).unwrap();
-        assert_eq!(cfg.layout, Layout::Rings);
+        assert_eq!(cfg.layout, Layout::Icons);
     }
 
     #[test]
-    fn layout_rings_case_insensitive() {
+    fn layout_icons_case_insensitive() {
+        let cfg: Config = serde_json::from_str(r#"{"layout":"ICONS"}"#).unwrap();
+        assert_eq!(cfg.layout, Layout::Icons);
+        let cfg: Config = serde_json::from_str(r#"{"layout":" icons "}"#).unwrap();
+        assert_eq!(cfg.layout, Layout::Icons);
+    }
+
+    #[test]
+    fn layout_rings_alias_parses_as_icons() {
+        let cfg: Config = serde_json::from_str(r#"{"layout":"rings"}"#).unwrap();
+        assert_eq!(cfg.layout, Layout::Icons);
         let cfg: Config = serde_json::from_str(r#"{"layout":"RINGS"}"#).unwrap();
-        assert_eq!(cfg.layout, Layout::Rings);
+        assert_eq!(cfg.layout, Layout::Icons);
     }
 }

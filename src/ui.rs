@@ -16,12 +16,12 @@ use crate::model::{
 };
 
 mod compact;
+mod tooltip;
 mod tray;
 
 struct Shared {
     claude: Option<ProviderSnapshot>,
     cursor: Option<ProviderSnapshot>,
-    refreshing: bool,
 }
 
 fn is_horizontal(cfg: &Config) -> bool {
@@ -151,24 +151,27 @@ fn spawn_worker(
 ) {
     thread::spawn(move || {
         let mut claude_poller = claude::Poller::new();
+        let mut last_good = crate::snapshot_cache::LastGood::load();
         loop {
-            {
-                let mut s = shared.lock().expect("shared lock");
-                s.refreshing = true;
-            }
-
             let cfg_disk = config::load();
             if let Ok(mut c) = cfg.lock() {
                 c.transparent_background = cfg_disk.transparent_background;
             }
-            let claude_snap = claude_poller.poll();
-            let cursor_snap = cursor::fetch(&cfg_disk);
+            let claude_snap = last_good.apply(
+                crate::snapshot_cache::Provider::Claude,
+                claude_poller.poll(),
+                Utc::now(),
+            );
+            let cursor_snap = last_good.apply(
+                crate::snapshot_cache::Provider::Cursor,
+                cursor::fetch(&cfg_disk),
+                Utc::now(),
+            );
 
             {
                 let mut s = shared.lock().expect("shared lock");
                 s.claude = Some(claude_snap);
                 s.cursor = Some(cursor_snap);
-                s.refreshing = false;
             }
             ctx.request_repaint();
 
@@ -239,6 +242,7 @@ struct WidgetApp {
 impl WidgetApp {
     fn new(cc: &eframe::CreationContext<'_>, cfg: Arc<Mutex<Config>>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        egui_extras::install_image_loaders(&cc.egui_ctx);
 
         let poll_secs = cfg.lock().expect("cfg lock").poll_seconds.max(30);
         let poll = Duration::from_secs(poll_secs);
@@ -246,7 +250,6 @@ impl WidgetApp {
         let shared = Arc::new(Mutex::new(Shared {
             claude: None,
             cursor: None,
-            refreshing: true,
         }));
 
         let (refresh_tx, refresh_rx) = mpsc::channel();
@@ -614,23 +617,19 @@ impl eframe::App for WidgetApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
 
-            let (claude, cursor, refreshing) = {
+            let (claude, cursor) = {
                 let s = self.shared.lock().expect("shared lock");
-                (s.claude.clone(), s.cursor.clone(), s.refreshing)
+                (s.claude.clone(), s.cursor.clone())
             };
 
             let now = Utc::now();
 
             if horizontal {
-                let (r, refresh_clicked) = if layout == Layout::Rings {
-                    compact::draw_rings(ui, claude.as_ref(), cursor.as_ref(), now, refreshing)
+                compact_rect = if layout == Layout::Icons {
+                    compact::draw_icons(ui, claude.as_ref(), cursor.as_ref(), now)
                 } else {
-                    compact::draw_compact(ui, claude.as_ref(), cursor.as_ref(), now, refreshing)
+                    compact::draw_compact(ui, claude.as_ref(), cursor.as_ref(), now)
                 };
-                compact_rect = r;
-                if refresh_clicked {
-                    self.action_refresh();
-                }
             } else {
                 let header_font = FontId::proportional(13.0);
                 let body_font = FontId::proportional(12.0);
@@ -642,53 +641,14 @@ impl eframe::App for WidgetApp {
                         draw_provider(ui, &header_font, &body_font, cursor.as_ref(), now);
 
                         ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new(footer_updated(
-                                    claude.as_ref(),
-                                    cursor.as_ref(),
-                                ))
-                                .color(Color32::GRAY)
-                                .small(),
-                            );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    let sense = if refreshing {
-                                        Sense::hover()
-                                    } else {
-                                        Sense::click()
-                                    };
-                                    let (rect, response) =
-                                        ui.allocate_exact_size(Vec2::new(14.0, 14.0), sense);
-                                    let color = if refreshing {
-                                        Color32::from_gray(80)
-                                    } else if response.hovered() {
-                                        ui.visuals().strong_text_color()
-                                    } else {
-                                        Color32::GRAY
-                                    };
-                                    let refresh_clicked = if refreshing {
-                                        false
-                                    } else {
-                                        response.clicked()
-                                    };
-                                    if !refreshing && response.hovered() {
-                                        response.on_hover_text("Refresh now");
-                                    }
-                                    ui.painter().text(
-                                        rect.center(),
-                                        Align2::CENTER_CENTER,
-                                        "⟳",
-                                        FontId::proportional(11.0),
-                                        color,
-                                    );
-                                    if refresh_clicked {
-                                        self.action_refresh();
-                                    }
-                                },
-                            );
-                        });
+                        ui.label(
+                            egui::RichText::new(footer_updated(
+                                claude.as_ref(),
+                                cursor.as_ref(),
+                            ))
+                            .color(Color32::GRAY)
+                            .small(),
+                        );
                     })
                     .response
                     .rect;
@@ -727,6 +687,9 @@ impl eframe::App for WidgetApp {
             ctx.request_repaint_after(Duration::from_secs(1));
         } else {
             ctx.request_repaint_after(Duration::from_secs(30));
+        }
+        if ctx.viewport_id() == egui::ViewportId::ROOT {
+            tooltip::show(ctx);
         }
     }
 }
@@ -816,7 +779,7 @@ fn draw_meter_row(ui: &mut egui::Ui, body_font: &FontId, m: &Meter, now: DateTim
         let (rect, response) = ui.allocate_exact_size(bar_size, Sense::hover());
         paint_meter_bar(ui.painter(), rect, m.percent);
         if let Some(ref detail) = m.detail {
-            response.on_hover_text(detail);
+            tooltip::set(&response, detail.as_str());
         }
 
         let (r, _) = ui.allocate_exact_size(egui::vec2(34.0, 14.0), Sense::hover());
@@ -902,18 +865,18 @@ mod tests {
         };
         assert!(is_horizontal(&both));
 
-        let rings = Config {
-            layout: Layout::Rings,
+        let icons = Config {
+            layout: Layout::Icons,
             taskbar_mode: false,
             ..Default::default()
         };
-        assert!(is_horizontal(&rings));
+        assert!(is_horizontal(&icons));
 
-        let rings_tb = Config {
-            layout: Layout::Rings,
+        let icons_tb = Config {
+            layout: Layout::Icons,
             taskbar_mode: true,
             ..Default::default()
         };
-        assert!(is_horizontal(&rings_tb));
+        assert!(is_horizontal(&icons_tb));
     }
 }

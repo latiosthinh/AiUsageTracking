@@ -22,7 +22,7 @@ impl Severity {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Meter {
     pub label: String,
     pub percent: f32,
